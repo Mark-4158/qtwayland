@@ -73,12 +73,18 @@
 #endif
 
 #include <QtGui/QGuiApplication>
+#include <QtDBus/QDBusConnection>
+#include <QtDBus/QDBusReply>
 
 QT_BEGIN_NAMESPACE
 
 namespace QtWaylandClient {
 
 Q_LOGGING_CATEGORY(lcQpaWaylandInput, "qt.qpa.wayland.input");
+
+static const QString &mDBusService = QStringLiteral("org.kde.KWindowSystem"),
+                     &mDBusPath = QStringLiteral("/org/kde/KWindowSystem"),
+                     &mDBusInterface = QStringLiteral("org.kde.KWindowInfo");
 
 QWaylandInputDevice::Keyboard::Keyboard(QWaylandInputDevice *p)
     : mParent(p)
@@ -261,9 +267,10 @@ QString QWaylandInputDevice::Pointer::cursorThemeName() const
 
 int QWaylandInputDevice::Pointer::cursorSize() const
 {
-    constexpr int defaultCursorSize = 32;
-    static const int xCursorSize = qEnvironmentVariableIntValue("XCURSOR_SIZE");
-    return xCursorSize > 0 ? xCursorSize : defaultCursorSize;
+    static const int m_cursorSize = [](const int xCursorSize){
+        return xCursorSize > 0 ? xCursorSize : 24;
+    }(qEnvironmentVariableIntValue("XCURSOR_SIZE"));
+    return m_cursorSize;
 }
 
 int QWaylandInputDevice::Pointer::idealCursorScale() const
@@ -737,6 +744,25 @@ void QWaylandInputDevice::Pointer::pointer_motion(uint32_t time, wl_fixed_t surf
         // We can't know the true position since we're getting events for another surface,
         // so we just set it outside of the window boundaries.
         pos = QPointF(-1, -1);
+        {
+            auto &&message = QDBusMessage::createMethodCall(mDBusService,
+                                                            mDBusPath,
+                                                            mDBusInterface,
+                                                            QStringLiteral("geometry"));
+
+            message << static_cast<quint64>(0);
+
+            QDBusReply<QVector<qint32> > &&reply = QDBusConnection::sessionBus().call(message);
+
+            if (reply.isValid()) {
+                QVector<qint32> &&globalPos = reply.value();
+
+                if (globalPos.size() == 2) {
+                    pos.setX(globalPos[0]);
+                    pos.setY(globalPos[1]);
+                }
+            }
+        }
         global = grab->window()->mapToGlobal(pos.toPoint());
         window = grab;
     }
