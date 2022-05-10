@@ -262,7 +262,7 @@ protected:
     QRegion mQueuedBufferDamage;
 
 private:
-    void setGeometry_helper(const QRect &rect);
+    void setGeometry_helper(QRect rect);
     void initWindow();
     void initializeWlSurface();
     bool shouldCreateShellSurface() const;

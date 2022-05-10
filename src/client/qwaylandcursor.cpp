@@ -46,6 +46,9 @@
 #include <QtGui/QImageReader>
 #include <QDebug>
 
+#include <QtDBus/QDBusConnection>
+#include <QtDBus/QDBusReply>
+
 #include <wayland-cursor.h>
 
 #include <algorithm>
@@ -53,6 +56,10 @@
 QT_BEGIN_NAMESPACE
 
 namespace QtWaylandClient {
+
+static const QString &mDBusService = QStringLiteral("org.kde.KWindowSystem"),
+                     &mDBusPath = QStringLiteral("/org/kde/KWindowSystem"),
+                     &mDBusInterface = QStringLiteral("org.kde.KWindowInfo");
 
 QWaylandCursorTheme *QWaylandCursorTheme::create(QWaylandShm *shm, int size, const QString &themeName)
 {
@@ -280,8 +287,18 @@ QPoint QWaylandCursor::pos() const
 
 void QWaylandCursor::setPos(const QPoint &pos)
 {
-    Q_UNUSED(pos);
-    qCWarning(lcQpaWayland) << "Setting cursor position is not possible on wayland";
+    auto &&message = QDBusMessage::createMethodCall(mDBusService,
+                                                    mDBusPath,
+                                                    mDBusInterface,
+                                                    QStringLiteral("setGeometry"));
+
+    message << static_cast<quint64>(0)
+            << static_cast<qint32>(pos.x())
+            << static_cast<qint32>(pos.y())
+            << qint32()
+            << qint32();
+
+    QDBusConnection::sessionBus().call(message);
 }
 
 } // namespace QtWaylandClient

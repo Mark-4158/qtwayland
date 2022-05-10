@@ -63,13 +63,22 @@
 #include <QtGui/private/qwindow_p.h>
 
 #include <QtCore/QDebug>
+#include <QtCore/QBuffer>
 #include <QtCore/QThread>
+#include <QtDBus/QDBusConnection>
+#include <QtDBus/QDBusMessage>
+
+#include <wayland/wayland-server.h>
 
 QT_BEGIN_NAMESPACE
 
 namespace QtWaylandClient {
 
 Q_LOGGING_CATEGORY(lcWaylandBackingstore, "qt.qpa.wayland.backingstore")
+
+static const QString &mDBusService = QStringLiteral("org.kde.KWindowSystem"),
+                     &mDBusPath = QStringLiteral("/org/kde/KWindowSystem"),
+                     &mDBusInterface = QStringLiteral("org.kde.KWindowInfo");
 
 QWaylandWindow *QWaylandWindow::mMouseGrab = nullptr;
 
@@ -88,8 +97,6 @@ QWaylandWindow::QWaylandWindow(QWindow *window, QWaylandDisplay *display)
 
     mScale = waylandScreen() ? waylandScreen()->scale() : 1; // fallback to 1 if we don't have a real screen
 
-    static WId id = 1;
-    mWindowId = id++;
     initializeWlSurface();
 }
 
@@ -209,12 +216,13 @@ void QWaylandWindow::initWindow()
 void QWaylandWindow::initializeWlSurface()
 {
     Q_ASSERT(!mSurface);
-    {
-        QWriteLocker lock(&mSurfaceLock);
-        mSurface.reset(new QWaylandSurface(mDisplay));
-        connect(mSurface.data(), &QWaylandSurface::screensChanged,
-                this, &QWaylandWindow::handleScreensChanged);
-        mSurface->m_window = this;
+    if (auto *s = new QWaylandSurface(mDisplay)) {
+        connect(s,
+                &QWaylandSurface::screensChanged,
+                s->m_window = this,
+                &QWaylandWindow::handleScreensChanged);
+        mWindowId = wl_proxy_get_id(reinterpret_cast<wl_proxy *>(s->object())); // see qwaylandsurface.cpp:94
+        mSurface.reset(s);
     }
     emit wlSurfaceCreated();
 }
@@ -247,6 +255,9 @@ void QWaylandWindow::reset()
     mShellSurface = nullptr;
     delete mSubSurfaceWindow;
     mSubSurfaceWindow = nullptr;
+
+    // See <https://wayland.freedesktop.org/docs/html/ch04.html#sect-Protocol-Creating-Objects>
+    mWindowId = 0;
 
     invalidateSurface();
     if (mSurface) {
@@ -329,15 +340,42 @@ void QWaylandWindow::setWindowIcon(const QIcon &icon)
 
     if (mWindowDecoration && window()->isVisible())
         mWindowDecoration->update();
+
+    if (mWindowId) {
+        auto &&message = QDBusMessage::createMethodCall(mDBusService,
+                                                        mDBusPath,
+                                                        mDBusService,
+                                                        QStringLiteral("setIcons"));
+        {
+            QByteArray bytes;
+            {
+                QBuffer buffer(&bytes);
+
+                buffer.open(QIODevice::WriteOnly);
+                icon.pixmap(128, 128).save(&buffer, "PNG");
+            }
+            message << static_cast<quint64>(mWindowId) << bytes << bytes.setRawData(nullptr, 0);
+        }
+        QDBusConnection::sessionBus().call(message);
+    }
 }
 
-void QWaylandWindow::setGeometry_helper(const QRect &rect)
+void QWaylandWindow::setGeometry_helper(QRect rect)
 {
-    QSize minimum = windowMinimumSize();
-    QSize maximum = windowMaximumSize();
-    QPlatformWindow::setGeometry(QRect(rect.x(), rect.y(),
-                qBound(minimum.width(), rect.width(), maximum.width()),
-                qBound(minimum.height(), rect.height(), maximum.height())));
+    rect.setSize(rect.size().expandedTo(windowMinimumSize()).boundedTo(windowMaximumSize()));
+    if ((rect.x() || rect.y()) && mWindowId) {
+        auto &&message = QDBusMessage::createMethodCall(mDBusService,
+                                                        mDBusPath,
+                                                        mDBusInterface,
+                                                        QStringLiteral("setGeometry"));
+        message << static_cast<quint64>(mWindowId)
+                << static_cast<qint32>(rect.x())
+                << static_cast<qint32>(rect.y())
+                << static_cast<qint32>(rect.width())
+                << static_cast<qint32>(rect.height());
+        QDBusConnection::sessionBus().call(message);
+    }
+    QPlatformWindow::setGeometry(rect);
 
     if (mSubSurfaceWindow) {
         QMargins m = QPlatformWindow::parent()->frameMargins();
@@ -453,6 +491,16 @@ void QWaylandWindow::raise()
 {
     if (mShellSurface)
         mShellSurface->raise();
+    else if (mWindowId) {
+        auto &&message = QDBusMessage::createMethodCall(mDBusService,
+                                                        mDBusPath,
+                                                        mDBusService,
+                                                        QStringLiteral("raiseWindow"));
+
+        message << static_cast<quint64>(mWindowId);
+
+        QDBusConnection::sessionBus().call(message);
+    }
 }
 
 
@@ -460,6 +508,16 @@ void QWaylandWindow::lower()
 {
     if (mShellSurface)
         mShellSurface->lower();
+    else if (mWindowId) {
+        auto &&message = QDBusMessage::createMethodCall(mDBusService,
+                                                        mDBusPath,
+                                                        mDBusService,
+                                                        QStringLiteral("lowerWindow"));
+
+        message << static_cast<quint64>(mWindowId);
+
+        QDBusConnection::sessionBus().call(message);
+    }
 }
 
 void QWaylandWindow::setMask(const QRegion &mask)
@@ -1032,7 +1090,16 @@ void QWaylandWindow::restoreMouseCursor(QWaylandInputDevice *device)
 
 void QWaylandWindow::requestActivateWindow()
 {
-    qCWarning(lcQpaWayland) << "Wayland does not support QWindow::requestActivate()";
+    if (mWindowId) {
+        auto &&message = QDBusMessage::createMethodCall(mDBusService,
+                                                        mDBusPath,
+                                                        mDBusService,
+                                                        QStringLiteral("activateWindow"));
+
+        message << static_cast<quint64>(mWindowId);
+
+        QDBusConnection::sessionBus().call(message);
+    }
 }
 
 bool QWaylandWindow::isExposed() const
